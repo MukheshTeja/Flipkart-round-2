@@ -112,7 +112,9 @@ export default function App() {
         barricade_needed: eventResult.barricade_needed,
         barricade_confidence: eventResult.barricade_confidence,
         estimated_barricade_points: eventResult.estimated_barricade_points,
+        barricade_locations: eventResult.barricade_locations ?? [],
         police_protocol: eventResult.police_protocol,
+        recommended_stations: eventResult.recommended_stations ?? [],
       };
     }
     return scenarioRoute?.protocol ?? null;

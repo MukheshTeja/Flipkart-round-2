@@ -145,6 +145,18 @@ def _path_weight(G, path):
     return total
 
 
+def _corridor_overlap_ratio(G, path_a, path_b) -> float:
+    """
+    Fraction of path_b's distinct corridors that also appear in path_a.
+    Returns 0.0 if path_b uses no corridors (degenerate path).
+    """
+    c_a = set(path_corridors(G, path_a))
+    c_b = set(path_corridors(G, path_b))
+    if not c_b:
+        return 0.0
+    return len(c_a & c_b) / len(c_b)
+
+
 def find_diversion_routes(G, blocked_corridor, origin, destination, hotspots, k=8):
     """
     Return (primary_path, secondary_path) avoiding `blocked_corridor`
@@ -152,6 +164,11 @@ def find_diversion_routes(G, blocked_corridor, origin, destination, hotspots, k=
 
     Uses Yen's algorithm (networkx.shortest_simple_paths) on a simple
     projection of the MultiDiGraph (keeping min-weight edge per pair).
+
+    Secondary route diversity: the secondary is rejected if it shares more
+    than 50% of its corridors with the primary.  The next least-overlapping
+    candidate is tried; if none qualifies, the closest available path is used
+    as fallback to keep the existing behaviour.
     """
     # Project to simple DiGraph using minimum edge weight per (u,v)
     simple = nx.DiGraph()
@@ -176,21 +193,33 @@ def find_diversion_routes(G, blocked_corridor, origin, destination, hotspots, k=
     except nx.NetworkXNoPath:
         return [], []
 
-    # Apply cascade awareness filter
+    # Cascade awareness: separate hotspot-free (valid) from hotspot-affected (rejected)
+    # Collect ALL candidates so we can search for a diverse secondary below.
     valid, rejected = [], []
     for path in candidates:
         if _path_in_hotspot(G, path, hotspots):
             rejected.append(path)
         else:
             valid.append(path)
-        if len(valid) >= 2:
+
+    # Ordered pool: prefer valid (hotspot-free) paths, then fallback to rejected
+    pool = valid + rejected
+    if not pool:
+        return [], []
+
+    primary = pool[0]
+
+    # Pick secondary: first candidate with ≤50% corridor overlap with primary
+    secondary = []
+    for candidate in pool[1:]:
+        if _corridor_overlap_ratio(G, primary, candidate) <= 0.5:
+            secondary = candidate
             break
 
-    if len(valid) < 2:
-        valid += rejected[: 2 - len(valid)]
+    if not secondary and len(pool) > 1:
+        # No sufficiently distinct path exists — fall back to next-best candidate
+        secondary = pool[1]
 
-    primary   = valid[0] if len(valid) > 0 else []
-    secondary = valid[1] if len(valid) > 1 else []
     return primary, secondary
 
 
@@ -241,7 +270,56 @@ def path_summary(G, path):
     )
     return f"{' → '.join(path)}  [{dist:.1f} km]"
 
-def fetch_osrm_route(G, path):
+def _point_to_segment_interior(p_lat, p_lon, a_lat, a_lon, b_lat, b_lon, threshold_km=0.05):
+    """
+    Return True if point P is within threshold_km of the *interior* of segment AB.
+
+    Checks only when the projection parameter t ∈ (0.1, 0.9), so points that
+    happen to coincide with a shared endpoint node (t ≈ 0 or 1) are not flagged
+    — routes legitimately start and end at those nodes.
+    """
+    scale_lat = 111.0
+    scale_lon = 111.0 * np.cos(np.radians((a_lat + b_lat) / 2))
+
+    px = (p_lon - a_lon) * scale_lon
+    py = (p_lat - a_lat) * scale_lat
+    dx = (b_lon - a_lon) * scale_lon
+    dy = (b_lat - a_lat) * scale_lat
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq < 1e-12:
+        return False
+    t = (px * dx + py * dy) / seg_len_sq
+    if not (0.1 < t < 0.9):
+        return False
+    cx = a_lon + t * (b_lon - a_lon)
+    cy = a_lat + t * (b_lat - a_lat)
+    return haversine_km(p_lat, p_lon, cy, cx) < threshold_km
+
+
+def _osrm_crosses_blocked(geom_coords, blocked_segments, threshold_km=0.05):
+    """
+    Return True if any OSRM geometry point is within threshold_km of the
+    interior of any blocked-corridor edge segment.
+    Endpoint nodes are excluded from the check so that routes which legitimately
+    share an origin/destination with the blocked corridor are not false-flagged.
+    """
+    for lon, lat in geom_coords:
+        for (a_lat, a_lon), (b_lat, b_lon) in blocked_segments:
+            if _point_to_segment_interior(lat, lon, a_lat, a_lon, b_lat, b_lon, threshold_km):
+                return True
+    return False
+
+
+def fetch_osrm_route(G, path, blocked_corridor=None):
+    """
+    Fetch real-world driving geometry from OSRM for the given node path.
+
+    If blocked_corridor is supplied, the returned OSRM geometry is checked
+    against the blocked corridor's edge segments.  If any geometry point falls
+    within 50 m of those edges, the OSRM result is discarded and None is
+    returned so the caller can fall back to a straight node-to-node polyline.
+    This prevents OSRM from silently routing through the very road we blocked.
+    """
     if not path or len(path) < 2:
         return None
     coords = []
@@ -251,16 +329,36 @@ def fetch_osrm_route(G, path):
         coords.append(f"{lon},{lat}")
     coord_string = ";".join(coords)
     url = f"http://router.project-osrm.org/route/v1/driving/{coord_string}?overview=full&geometries=geojson"
+
+    # Pre-compute blocked corridor edge segments once (before the network call)
+    blocked_segments = []
+    if blocked_corridor:
+        for u, v, data in G.edges(data=True):
+            if data.get("corridor") == blocked_corridor:
+                blocked_segments.append((
+                    (G.nodes[u]["lat"], G.nodes[u]["lon"]),
+                    (G.nodes[v]["lat"], G.nodes[v]["lon"]),
+                ))
+
     try:
         resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("code") == "Ok" and len(data.get("routes", [])) > 0:
                 route = data["routes"][0]
+                geom = route["geometry"]["coordinates"]  # [[lon, lat], ...]
+
+                if blocked_segments and _osrm_crosses_blocked(geom, blocked_segments):
+                    print(
+                        f"[WARNING] OSRM geometry passes through blocked corridor "
+                        f"{blocked_corridor!r} — discarding and using node polyline fallback."
+                    )
+                    return None
+
                 return {
                     "distance_km": route["distance"] / 1000.0,
                     "duration_min": route["duration"] / 60.0,
-                    "geometry": route["geometry"]["coordinates"] # [lon, lat] points
+                    "geometry": geom,  # [lon, lat] points
                 }
     except Exception as e:
         print(f"OSRM Error: {e}")
@@ -363,12 +461,27 @@ def run_diversion(
     primary, secondary = find_diversion_routes(
         G, blocked_corridor, origin, destination, hotspots
     )
-    primary_corridors = path_corridors(
-        G, primary, exclude_corridor=blocked_corridor
-    )
-    secondary_corridors = path_corridors(
-        G, secondary, exclude_corridor=blocked_corridor
-    )
+
+    # Fetch OSRM data for both routes before building the response so we can
+    # use live travel-time to confirm (or swap) the Yen's-based ranking.
+    primary_osrm = fetch_osrm_route(G, primary, blocked_corridor=blocked_corridor)
+    secondary_osrm = fetch_osrm_route(G, secondary, blocked_corridor=blocked_corridor)
+
+    # Re-rank by OSRM duration: if both succeeded and the secondary route is
+    # ≥10% faster in real travel time, promote it to primary.
+    pri_dur = primary_osrm.get("duration_min") if primary_osrm else None
+    sec_dur = secondary_osrm.get("duration_min") if secondary_osrm else None
+    if pri_dur and sec_dur and sec_dur < pri_dur * 0.9:
+        print(
+            f"[INFO] OSRM duration swap: secondary ({sec_dur:.1f} min) is faster "
+            f"than primary ({pri_dur:.1f} min) — promoting secondary to primary."
+        )
+        primary, secondary = secondary, primary
+        primary_osrm, secondary_osrm = secondary_osrm, primary_osrm
+
+    primary_corridors = path_corridors(G, primary, exclude_corridor=blocked_corridor)
+    secondary_corridors = path_corridors(G, secondary, exclude_corridor=blocked_corridor)
+
     return {
         "blocked_corridor": blocked_corridor,
         "origin": origin,
@@ -381,8 +494,8 @@ def run_diversion(
         "secondary_corridors": secondary_corridors,
         "primary_distance_km": round(_path_weight_km(G, primary), 1),
         "secondary_distance_km": round(_path_weight_km(G, secondary), 1),
-        "primary_osrm": fetch_osrm_route(G, primary),
-        "secondary_osrm": fetch_osrm_route(G, secondary),
+        "primary_osrm": primary_osrm,
+        "secondary_osrm": secondary_osrm,
         "hotspot_count": len(hotspots),
         "officer_instruction": officer_instruction(
             G, blocked_corridor, origin, destination, primary

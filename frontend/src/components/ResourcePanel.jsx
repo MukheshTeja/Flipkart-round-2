@@ -28,7 +28,7 @@ export default function ResourcePanel({ result }) {
         </article>
         <article>
           <ShieldCheck />
-          <span>ML confidence</span>
+          <span>Estimated likelihood</span>
           <strong className="numeric">{Math.round(result.barricade_confidence * 100)}%</strong>
         </article>
       </div>

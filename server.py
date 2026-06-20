@@ -29,6 +29,7 @@ from graph_config import CORRIDOR_EDGES, NODES
 from manpower import (
     build_station_coords,
     compute_officers,
+    init_manpower_data,
     predict_barricade,
     primary_station_per_corridor,
     recommend_stations,
@@ -167,6 +168,7 @@ def _build_learning_cache():
 
 
 df_full, df, df_closed = _prepare_data()
+init_manpower_data(df_full)   # populate data-driven CLOSURE_RATE from dataset
 PIPELINE = severity_module.PIPELINE
 MODEL_METADATA = _load_model_metadata()
 STATION_COORDS = build_station_coords(df)
@@ -259,15 +261,18 @@ def run_scenario(index: int):
     )
 
     sp = _SCENARIO_DEFAULTS[index]
-    barricade = predict_barricade(sp["event_cause"], sp["severity_score"])
+    barricade = predict_barricade(
+        sp["event_cause"], sp["severity_score"],
+        blocked_corridor=scenario["blocked"], nodes_dict=NODES_DICT,
+    )
     officers = compute_officers(
         sp["severity_score"], scenario["blocked"], sp["crowd_size"], sp["event_cause"]
     )
 
     return {
         "scenario": scenario,
-        "primary": {**get_path_metrics(G, primary), "osrm": fetch_osrm_route(G, primary)},
-        "secondary": {**get_path_metrics(G, secondary), "osrm": fetch_osrm_route(G, secondary)},
+        "primary": {**get_path_metrics(G, primary), "osrm": fetch_osrm_route(G, primary, blocked_corridor=scenario["blocked"])},
+        "secondary": {**get_path_metrics(G, secondary), "osrm": fetch_osrm_route(G, secondary, blocked_corridor=scenario["blocked"])},
         "instruction": instruction,
         "protocol": {
             "severity_label": sp["severity_label"],
@@ -293,7 +298,8 @@ def get_nodes():
 def analyze_event(payload: EventInput):
     severity = severity_module.predict_severity(payload.model_dump())
     barricade = predict_barricade(
-        payload.event_cause, severity["severity_score"]
+        payload.event_cause, severity["severity_score"],
+        blocked_corridor=payload.blocked_corridor, nodes_dict=NODES_DICT,
     )
     officers = compute_officers(
         severity["severity_score"],
@@ -357,9 +363,12 @@ def analyze_event(payload: EventInput):
         f"Officers should arrive by {arrive_by}."
     )
 
+    # Record load only for the primary dispatched station (stations[0]).
+    # The secondary station is a backup suggestion, not a confirmed dispatch;
+    # counting it would unfairly bias future recommendations away from it.
     now = time.time()
-    for station in stations:
-        app.state.active_load[station["name"]].append(now)
+    if stations:
+        app.state.active_load[stations[0]["name"]].append(now)
 
     return result
 

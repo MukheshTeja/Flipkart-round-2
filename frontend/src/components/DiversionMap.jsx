@@ -9,7 +9,7 @@ import {
   TileLayer,
   useMap,
 } from 'react-leaflet';
-import { AlertTriangle, Navigation2, Radio, Route } from 'lucide-react';
+import { AlertTriangle, Clock, Navigation2, Radio, Route } from 'lucide-react';
 
 function MovingMarker({ positions, color }) {
   const [currentPos, setCurrentPos] = React.useState(null);
@@ -205,8 +205,15 @@ export default function DiversionMap({ networkState, routeData, custom, protocol
     return null;
   };
 
+  const getOsrmDuration = (type) => {
+    const osrm = custom ? routeData?.[`${type}_osrm`] : routeData?.[type]?.osrm;
+    return osrm?.duration_min != null ? Math.round(osrm.duration_min) : null;
+  };
+
   const primaryOsrmGeometry = getOsrmGeometry('primary');
   const secondaryOsrmGeometry = getOsrmGeometry('secondary');
+  const primaryDuration = getOsrmDuration('primary');
+  const secondaryDuration = getOsrmDuration('secondary');
 
   const finalPrimary = primaryOsrmGeometry || primaryPositions;
   const finalSecondary = secondaryOsrmGeometry || secondaryPositions;
@@ -256,11 +263,23 @@ export default function DiversionMap({ networkState, routeData, custom, protocol
         <article>
           <span><Navigation2 size={14} /> Original route</span>
           <strong className="numeric">{primaryDistance ?? 0} km</strong>
+          {primaryDuration != null && (
+            <small style={{ opacity: 0.7 }}>{primaryDuration} min</small>
+          )}
         </article>
         <article>
           <span><Route size={14} /> Diversion route</span>
           <strong className="numeric">{secondaryDistance ?? 0} km</strong>
+          {secondaryDuration != null && (
+            <small style={{ opacity: 0.7 }}>{secondaryDuration} min</small>
+          )}
         </article>
+        {(primaryDuration != null || secondaryDuration != null) && (
+          <article>
+            <span><Clock size={14} /> Travel time source</span>
+            <strong style={{ fontSize: 11 }}>Live OSRM</strong>
+          </article>
+        )}
       </div>
 
       {protocol && (() => {
@@ -297,6 +316,12 @@ export default function DiversionMap({ networkState, routeData, custom, protocol
           <li><span className="legend-line primary" /> Original Route (Avoid)</li>
           <li><span className="legend-line secondary" /> Recommended Route</li>
           <li><span className="legend-circle hotspot" /> Congestion Hotspot</li>
+          {(protocol?.recommended_stations || []).length > 0 && (
+            <li><span className="legend-pin" style={{ background: '#6366f1' }}>PS</span> Police Station</li>
+          )}
+          {(protocol?.barricade_locations || []).length > 0 && (
+            <li><span className="legend-circle" style={{ background: '#f59e0b', display: 'inline-block', width: 10, height: 10, borderRadius: '50%' }} /> Barricade Point</li>
+          )}
         </ul>
       </div>
 
@@ -412,6 +437,39 @@ export default function DiversionMap({ networkState, routeData, custom, protocol
             <Popup>{nodeData[scenario.dest].name}</Popup>
           </Marker>
         )}
+
+        {/* Recommended police station markers */}
+        {(protocol?.recommended_stations || []).map((station, i) =>
+          station.lat != null && station.lon != null ? (
+            <Marker
+              key={`station-${i}`}
+              position={[station.lat, station.lon]}
+              icon={L.divIcon({
+                className: 'custom-div-icon',
+                html: `<div class="map-pin" style="--pin-color:#6366f1; font-size:10px;">PS</div>`,
+                iconSize: [34, 34],
+                iconAnchor: [17, 17],
+              })}
+            >
+              <Popup>
+                <strong>{station.name}</strong><br />
+                {station.distance_km} km away{station.is_primary ? ' · Primary' : ''}
+              </Popup>
+            </Marker>
+          ) : null
+        )}
+
+        {/* Barricade point markers */}
+        {(protocol?.barricade_locations || []).map((loc, i) => (
+          <CircleMarker
+            key={`barricade-${i}`}
+            center={[loc.lat, loc.lon]}
+            radius={8}
+            pathOptions={{ color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.8, weight: 2 }}
+          >
+            <Popup>{loc.description || 'Barricade point'}</Popup>
+          </CircleMarker>
+        ))}
       </MapContainer>
     </section>
   );
