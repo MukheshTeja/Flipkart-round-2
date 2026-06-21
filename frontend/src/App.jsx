@@ -9,7 +9,7 @@ import ResourcePanel from './components/ResourcePanel';
 import SeverityGauge from './components/SeverityGauge';
 import ProtocolPanel from './components/ProtocolPanel';
 
-const API = 'http://127.0.0.1:8000';
+const API = import.meta.env.DEV ? 'http://127.0.0.1:8000' : '';
 
 const views = [
   { id: 'report', label: 'Analyze Event', icon: Siren },

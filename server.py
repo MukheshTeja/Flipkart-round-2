@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import severity as severity_module
@@ -446,6 +448,24 @@ def retrain():
         "mean_error_min": grouped.round(1).tolist(),
     }
     return {"status": "ok", "metadata": MODEL_METADATA}
+
+
+# ── Serve React frontend in production ────────────────────────────────────────
+_DIST = ROOT / "frontend" / "dist"
+if _DIST.exists():
+    app.mount("/assets", StaticFiles(directory=str(_DIST / "assets")), name="assets")
+
+@app.get("/")
+async def serve_root():
+    if _DIST.exists():
+        return FileResponse(str(_DIST / "index.html"))
+    return {"api": "ASTRAM Traffic Manager", "docs": "/docs"}
+
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    if _DIST.exists():
+        return FileResponse(str(_DIST / "index.html"))
+    raise HTTPException(status_code=404, detail="Not found")
 
 
 if __name__ == "__main__":
