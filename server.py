@@ -339,7 +339,6 @@ def analyze_event(payload: EventInput):
             payload.origin,
             payload.destination,
             df_recent=df.tail(500),
-            return_map_html=True,
         )
     else:
         result["diversion"] = None

@@ -1,0 +1,36 @@
+{
+  "roc_auc_cv_mean": 0.7341,
+  "roc_auc_cv_std": 0.0119,
+  "positive_rate": 0.0827,
+  "n_samples": 8173,
+  "top_positive_features": [
+    [
+      "event_cause_vip_movement",
+      2.416
+    ],
+    [
+      "event_cause_public_event",
+      1.573
+    ],
+    [
+      "event_cause_tree_fall",
+      1.383
+    ],
+    [
+      "event_cause_protest",
+      1.122
+    ],
+    [
+      "event_cause_construction",
+      0.793
+    ],
+    [
+      "event_cause_procession",
+      0.722
+    ],
+    [
+      "event_cause_debris",
+      0.112
+    ]
+  ]
+}

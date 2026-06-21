@@ -15,7 +15,7 @@ Pipeline:
 import pandas as pd
 import numpy as np
 import networkx as nx
-import folium
+
 import requests
 from sklearn.cluster import DBSCAN
 from itertools import islice
@@ -378,75 +378,7 @@ def _path_weight_km(G, path):
     )
 
 
-def generate_map(
-    G,
-    blocked_corridor,
-    primary,
-    secondary,
-    hotspots,
-    output_file=None,
-    return_html=True,
-):
-    """Build a Folium map and optionally save it or return its HTML."""
-    route_nodes = list(dict.fromkeys((primary or []) + (secondary or [])))
-    if route_nodes:
-        center = [
-            sum(G.nodes[node]["lat"] for node in route_nodes) / len(route_nodes),
-            sum(G.nodes[node]["lon"] for node in route_nodes) / len(route_nodes),
-        ]
-    else:
-        center = [12.9716, 77.5946]
 
-    map_obj = folium.Map(
-        location=center,
-        zoom_start=12,
-        tiles="CartoDB dark_matter",
-        control_scale=True,
-    )
-
-    for u, v, data in G.edges(data=True):
-        if data["corridor"] != blocked_corridor:
-            continue
-        folium.PolyLine(
-            [
-                (G.nodes[u]["lat"], G.nodes[u]["lon"]),
-                (G.nodes[v]["lat"], G.nodes[v]["lon"]),
-            ],
-            color="#E5484D",
-            weight=6,
-            opacity=0.9,
-            tooltip=f"Blocked: {blocked_corridor}",
-        ).add_to(map_obj)
-
-    def add_route(path, color, label, dash_array=None):
-        if not path:
-            return
-        points = [(G.nodes[node]["lat"], G.nodes[node]["lon"]) for node in path]
-        folium.PolyLine(
-            points,
-            color=color,
-            weight=6,
-            opacity=0.95,
-            dash_array=dash_array,
-            tooltip=label,
-        ).add_to(map_obj)
-
-    add_route(primary, "#F5A524", "Primary diversion")
-    add_route(secondary, "#38BDF8", "Secondary diversion", "10 8")
-
-    for hotspot in hotspots:
-        folium.Circle(
-            location=[hotspot["lat"], hotspot["lon"]],
-            radius=800,
-            color="#E5484D",
-            fill=True,
-            fill_opacity=0.16,
-            tooltip=f"{hotspot['count']} recent events",
-        ).add_to(map_obj)
-
-    if output_file:
-        map_obj.save(output_file)
-    return map_obj.get_root().render() if return_html else map_obj
 
 
 def run_diversion(
@@ -454,7 +386,6 @@ def run_diversion(
     origin: str,
     destination: str,
     df_recent=None,
-    return_map_html=False,
 ) -> dict:
     G = build_graph()
     hotspots = cluster_hotspots(df_recent) if df_recent is not None else []
@@ -500,18 +431,6 @@ def run_diversion(
         "officer_instruction": officer_instruction(
             G, blocked_corridor, origin, destination, primary
         ),
-        "map_html": (
-            generate_map(
-                G,
-                blocked_corridor,
-                primary,
-                secondary,
-                hotspots,
-                return_html=True,
-            )
-            if return_map_html
-            else None
-        ),
     }
 
 
@@ -537,65 +456,4 @@ SCENARIOS = [
 ]
 
 
-def main():
-    banner = "=" * 62
-    print(f"\n{banner}")
-    print("  BENGALURU DIVERSION ROUTE PLANNER  (Cascade-Aware)")
-    print(f"{banner}\n")
 
-    # ── Load ASTRAM data ──────────────────────────────────────
-    print("Loading ASTRAM dataset...")
-    df = pd.read_csv(DATA_FILE, low_memory=False)
-    df["latitude"]  = pd.to_numeric(df["latitude"],  errors="coerce")
-    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-    df["corridor"]  = df["corridor"].fillna("Non-corridor")
-    df = df.dropna(subset=["latitude", "longitude"])
-    df = df[(df["latitude"] > 12.7) & (df["latitude"] < 13.2)
-          & (df["longitude"] > 77.3) & (df["longitude"] < 77.9)]
-    print(f"  {len(df):,} events loaded (within Bengaluru bounds)\n")
-
-    # ── Build graph ───────────────────────────────────────────
-    print("Building Bengaluru corridor graph...")
-    G = build_graph()
-    print(f"  {G.number_of_nodes()} junctions  |  {G.number_of_edges()} directed edges\n")
-
-    # ── DBSCAN hotspot detection ──────────────────────────────
-    print("Running DBSCAN to identify live congestion hotspots...")
-    hotspots = cluster_hotspots(df, eps_km=0.8, min_samples=4)
-    print(f"  {len(hotspots)} clusters detected")
-    for h in hotspots[:5]:
-        top_corr = list(h["corridors"])[:2]
-        print(f"  • Cluster {h['label']:2d}: {h['count']:3d} events  "
-              f"({h['lat']:.4f}, {h['lon']:.4f})  corridors: {top_corr}")
-
-    # ── Run each scenario ─────────────────────────────────────
-    for i, s in enumerate(SCENARIOS, 1):
-        print(f"\n{'─'*62}")
-        print(f"SCENARIO {i}: {s['desc']}")
-        print(f"  Blocked : {s['blocked']}")
-        print(f"  Route   : {s['origin']} → {s['dest']}")
-
-        primary, secondary = find_diversion_routes(
-            G, s["blocked"], s["origin"], s["dest"], hotspots
-        )
-
-        if primary:
-            print(f"\n  PRIMARY   : {path_summary(G, primary)}")
-            print(f"  Via       : {' → '.join(path_corridors(G, primary, exclude_corridor=s['blocked']))}")
-        else:
-            print("  PRIMARY   : ⚠️  No viable route found")
-
-        if secondary:
-            print(f"  SECONDARY : {path_summary(G, secondary)}")
-            print(f"  Via       : {' → '.join(path_corridors(G, secondary, exclude_corridor=s['blocked']))}")
-
-        instr = officer_instruction(G, s["blocked"], s["origin"], s["dest"], primary)
-        print(f"\n  📢 OFFICER INSTRUCTION:\n     {instr}")
-
-    print(f"\n{banner}")
-    print("  Done.  Simulation complete.")
-    print(f"{banner}\n")
-
-
-if __name__ == "__main__":
-    main()

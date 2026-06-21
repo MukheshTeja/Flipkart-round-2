@@ -12,33 +12,49 @@ import {
 import { AlertTriangle, Clock, Navigation2, Radio, Route } from 'lucide-react';
 
 function MovingMarker({ positions, color }) {
-  const [currentPos, setCurrentPos] = React.useState(null);
+  const markerRef = React.useRef(null);
   
   React.useEffect(() => {
-    if (!positions || positions.length < 2) {
-      if (positions && positions.length === 1) {
-        setCurrentPos(positions[0]);
-      }
-      return;
+    if (!positions || positions.length < 2) return;
+    
+    // Calculate cumulative distances
+    const dists = [0];
+    let totalDist = 0;
+    for (let i = 0; i < positions.length - 1; i++) {
+      const p1 = positions[i];
+      const p2 = positions[i + 1];
+      const d = Math.sqrt(Math.pow(p1[0] - p2[0], 2) + Math.pow(p1[1] - p2[1], 2));
+      totalDist += d;
+      dists.push(totalDist);
     }
+    
     let frameId;
     let startTime;
-    const duration = 7000; // 7 seconds for full loop
+    // 35 seconds to travel the entire path (smooth and slow)
+    const duration = 35000;
     
     const animate = (time) => {
       if (!startTime) startTime = time;
       const progress = ((time - startTime) % duration) / duration;
-      const exactIndex = progress * (positions.length - 1);
-      const idx = Math.floor(exactIndex);
-      const nextIdx = (idx + 1) % positions.length;
-      const t = exactIndex - idx;
+      const currentDist = progress * totalDist;
+      
+      let idx = 0;
+      while (idx < dists.length - 1 && dists[idx + 1] < currentDist) {
+        idx++;
+      }
       
       const p1 = positions[idx];
-      const p2 = positions[nextIdx];
+      const p2 = positions[idx + 1];
+      
       if (p1 && p2) {
+        const segmentDist = dists[idx + 1] - dists[idx];
+        const t = segmentDist > 0 ? (currentDist - dists[idx]) / segmentDist : 0;
         const lat = p1[0] + (p2[0] - p1[0]) * t;
         const lon = p1[1] + (p2[1] - p1[1]) * t;
-        setCurrentPos([lat, lon]);
+        
+        if (markerRef.current) {
+          markerRef.current.setLatLng([lat, lon]);
+        }
       }
       
       frameId = requestAnimationFrame(animate);
@@ -48,11 +64,12 @@ function MovingMarker({ positions, color }) {
     return () => cancelAnimationFrame(frameId);
   }, [positions]);
 
-  if (!currentPos) return null;
+  if (!positions || positions.length === 0) return null;
   
   return (
     <Marker 
-      position={currentPos} 
+      position={positions[0]} 
+      ref={markerRef}
       icon={L.divIcon({
         className: 'moving-marker-icon',
         html: `<div style="background:${color}; width:16px; height:16px; border-radius:50%; border:3px solid white; box-shadow: 0 0 12px ${color}; display: grid; place-items: center; font-size: 9px; line-height: 1;">🚕</div>`,
@@ -98,13 +115,19 @@ function getOffsetRoutes(primary, secondary) {
   const newPrimary = [];
   const newSecondary = [];
   
+  const thresholdSq = threshold * threshold;
+  
   for (let i = 0; i < primary.length; i++) {
     const pPt = primary[i];
     let isOverlap = false;
     for (let j = 0; j < secondary.length; j++) {
       const sPt = secondary[j];
-      const dist = Math.sqrt(Math.pow(pPt[0] - sPt[0], 2) + Math.pow(pPt[1] - sPt[1], 2));
-      if (dist < threshold) {
+      const dx = pPt[0] - sPt[0];
+      if (dx > threshold || dx < -threshold) continue;
+      const dy = pPt[1] - sPt[1];
+      if (dy > threshold || dy < -threshold) continue;
+      
+      if (dx * dx + dy * dy < thresholdSq) {
         isOverlap = true;
         break;
       }
@@ -133,8 +156,12 @@ function getOffsetRoutes(primary, secondary) {
     let isOverlap = false;
     for (let i = 0; i < primary.length; i++) {
       const pPt = primary[i];
-      const dist = Math.sqrt(Math.pow(pPt[0] - sPt[0], 2) + Math.pow(pPt[1] - sPt[1], 2));
-      if (dist < threshold) {
+      const dx = pPt[0] - sPt[0];
+      if (dx > threshold || dx < -threshold) continue;
+      const dy = pPt[1] - sPt[1];
+      if (dy > threshold || dy < -threshold) continue;
+      
+      if (dx * dx + dy * dy < thresholdSq) {
         isOverlap = true;
         break;
       }
@@ -231,27 +258,7 @@ export default function DiversionMap({ networkState, routeData, custom, protocol
 
   const instruction = custom ? routeData?.officer_instruction : routeData?.instruction;
 
-  const animationHandler = {
-    add: (e) => {
-      const path = e.target._path;
-      if (path) {
-        const length = path.getTotalLength();
-        path.style.strokeDasharray = length;
-        path.style.strokeDashoffset = length;
-        path.getBoundingClientRect(); // force reflow
-        path.style.transition = 'stroke-dashoffset 1.4s ease-out';
-        path.style.strokeDashoffset = '0';
-        // Clear dash styles after animation so the full route stays visible at all zoom levels.
-        // Without this, Leaflet re-renders the SVG path on zoom (changing pixel length) but
-        // strokeDasharray stays at the original pixel length → partial route visibility.
-        setTimeout(() => {
-          path.style.strokeDasharray = '';
-          path.style.strokeDashoffset = '';
-          path.style.transition = '';
-        }, 1500);
-      }
-    }
-  };
+
 
   return (
     <section className="map-view">
@@ -384,14 +391,12 @@ export default function DiversionMap({ networkState, routeData, custom, protocol
               positions={offsetSecondary}
               className="diversion-glow"
               pathOptions={{ color: 'var(--route-secondary)', weight: 12, opacity: 0.3 }}
-              eventHandlers={{ add: animationHandler.add }}
             />
             {/* Solid diversion route */}
             <Polyline 
               key={`sec-route-${offsetSecondary.length}-${offsetSecondary[0]?.[0]}`}
               positions={offsetSecondary} 
               pathOptions={{ color: 'var(--route-secondary)', weight: 6 }} 
-              eventHandlers={{ add: animationHandler.add }}
             />
           </>
         )}
@@ -401,7 +406,6 @@ export default function DiversionMap({ networkState, routeData, custom, protocol
             key={`pri-route-${offsetPrimary.length}-${offsetPrimary[0]?.[0]}`}
             positions={offsetPrimary} 
             pathOptions={{ color: 'var(--route-primary)', weight: 4, dashArray: '8 8', opacity: 0.85 }} 
-            eventHandlers={{ add: animationHandler.add }}
           />
         )}
         

@@ -132,7 +132,6 @@ def _barricade_locations(blocked_corridor, nodes_dict, severity_score) -> list:
     if not blocked_corridor or not nodes_dict:
         return []
 
-    from graph_config import CORRIDOR_EDGES
 
     # Collect all (u, v) node pairs that belong to the blocked corridor
     endpoint_ids: set = set()
